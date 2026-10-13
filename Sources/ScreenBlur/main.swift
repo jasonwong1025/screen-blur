@@ -4,8 +4,18 @@ import Carbon.HIToolbox
 // MARK: - Model
 
 struct Region: Codable {
+    var id = UUID()
     var rect: CGRect          // global Cocoa screen coordinates
     var enabled = true
+
+    init(rect: CGRect) { self.rect = rect }
+
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        id = try values.decodeIfPresent(UUID.self, forKey: .id) ?? UUID()
+        rect = try values.decode(CGRect.self, forKey: .rect)
+        enabled = try values.decode(Bool.self, forKey: .enabled)
+    }
 }
 
 struct Preset: Codable {
@@ -323,11 +333,36 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var toastHide: DispatchWorkItem?
     private var unavailableKeys: [String] = []
 
+    // Regions picked by clicking an item follow that item while it still exists.
+    private var tracked: [UUID: (element: AXUIElement, window: AXUIElement?)] = [:]
+    private var offscreen: Set<UUID> = []
+    private var trackTimer: Timer?
+    private var clickTap: ClickTap?
+    private var pickTimer: Timer?
+    private var hovered: (element: AXUIElement, rect: CGRect)?
+    private lazy var highlight: NSPanel = {
+        let panel = NSPanel(contentRect: .zero, styleMask: [.borderless, .nonactivatingPanel],
+                            backing: .buffered, defer: false)
+        panel.isOpaque = false
+        panel.backgroundColor = NSColor.systemYellow.withAlphaComponent(0.2)
+        panel.hasShadow = false
+        panel.level = .screenSaver + 1
+        panel.ignoresMouseEvents = true
+        panel.hidesOnDeactivate = false
+        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
+        panel.contentView?.wantsLayer = true
+        panel.contentView?.layer?.borderColor = NSColor.systemYellow.cgColor
+        panel.contentView?.layer?.borderWidth = 2
+        OverlaySpace.pin(panel)
+        return panel
+    }()
+
     // Single source of truth for the global hotkeys and the cheat sheet.
     private lazy var shortcuts: [Shortcut] = [
         Shortcut(keyCode: kVK_ANSI_B, modifiers: Self.main, keys: "⌃⇧B", title: "Blur on / off (all regions)") { [weak self] in self?.toggleBlur() },
         Shortcut(keyCode: kVK_ANSI_F, modifiers: Self.main, keys: "⌃⇧F", title: "Panic: blur the full screen") { [weak self] in self?.togglePanic() },
         Shortcut(keyCode: kVK_ANSI_N, modifiers: Self.main, keys: "⌃⇧N", title: "New region (drag to draw)") { [weak self] in self?.toggleDraw() },
+        Shortcut(keyCode: kVK_ANSI_C, modifiers: Self.main, keys: "⌃⇧C", title: "Click an item to blur it") { [weak self] in self?.togglePick() },
         Shortcut(keyCode: kVK_ANSI_E, modifiers: Self.main, keys: "⌃⇧E", title: "Edit regions (move, resize, delete)") { [weak self] in self?.toggleEdit() },
         Shortcut(keyCode: kVK_ANSI_A, modifiers: Self.main, keys: "⌃⇧A", title: "Auto-detect sensitive text on / off") { [weak self] in self?.toggleAuto() },
         Shortcut(keyCode: kVK_ANSI_S, modifiers: Self.main, keys: "⌃⇧S", title: "Save regions as a preset") { [weak self] in self?.savePreset() },
@@ -393,10 +428,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             window.blur.onChange = { [weak self] frame in
                 guard let self, self.state.regions.indices.contains(index) else { return }
                 self.state.regions[index].rect = frame
+                self.tracked[self.state.regions[index].id] = nil   // moved by hand: stop following
                 self.state.save()
             }
             window.blur.onDelete = { [weak self] in self?.removeRegion(index) }
-            if (blurOn && region.enabled) || editing { window.orderFrontRegardless() } else { window.orderOut(nil) }
+            let visible = blurOn && region.enabled && !offscreen.contains(region.id)
+            if visible || editing { window.orderFrontRegardless() } else { window.orderOut(nil) }
         }
 
         let rects = blurOn && state.autoDetect ? autoRects : []
@@ -453,6 +490,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     @objc private func removeAll() {
         state.regions = []
+        tracked = [:]
+        offscreen = []
         state.save()
         refresh()
         toast("All regions removed")
@@ -467,6 +506,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     @objc private func toggleDraw() {
         guard drawWindows.isEmpty else { endDraw(); return }
+        endPick()
         previousApp = NSWorkspace.shared.frontmostApplication
         for screen in NSScreen.screens {
             let window = DrawWindow(contentRect: screen.frame, styleMask: .borderless,
@@ -501,6 +541,100 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         state.save()
         blurOn = true
         refresh()
+    }
+
+    // MARK: Pick mode (click an item to blur it)
+
+    @objc private func togglePick() {
+        guard clickTap == nil else { endPick(); return }
+        guard AXIsProcessTrustedWithOptions(["AXTrustedCheckOptionPrompt": true] as CFDictionary) else {
+            let alert = NSAlert()
+            alert.messageText = "Click-to-blur needs Accessibility permission"
+            alert.informativeText = "ScreenBlur asks macOS which button, text or icon is under the pointer so it can cover exactly that item.\n\nAllow ScreenBlur under System Settings → Privacy & Security → Accessibility, then press ⌃⇧C again."
+            present(alert)
+            return
+        }
+        if !drawWindows.isEmpty { endDraw() }
+        let tap = ClickTap()
+        tap.onClick = { [weak self] in self?.pickHovered() }
+        tap.onEscape = { [weak self] in self?.endPick() }
+        guard tap.start() else { toast("Could not capture clicks"); return }
+        clickTap = tap
+        pickTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 30, repeats: true) { [weak self] _ in self?.updateHover() }
+        RunLoop.main.add(pickTimer!, forMode: .common)
+        toast("Click any item to blur it  ·  Esc when done", seconds: 4)
+    }
+
+    private func endPick() {
+        guard clickTap != nil else { return }
+        clickTap?.stop()
+        clickTap = nil
+        pickTimer?.invalidate()
+        pickTimer = nil
+        hovered = nil
+        highlight.orderOut(nil)
+    }
+
+    private func updateHover() {
+        guard let element = AX.element(at: NSEvent.mouseLocation),
+              let rect = AX.frame(of: element).rect, rect.width > 1, rect.height > 1 else {
+            hovered = nil
+            highlight.orderOut(nil)
+            return
+        }
+        hovered = (element, rect)
+        highlight.setFrame(rect.insetBy(dx: -3, dy: -3), display: true)
+        highlight.orderFrontRegardless()
+    }
+
+    private func pickHovered() {
+        updateHover()
+        guard let hovered else { return }
+        let region = Region(rect: hovered.rect.insetBy(dx: -6, dy: -4))
+        tracked[region.id] = (hovered.element, AX.window(of: hovered.element))
+        state.regions.append(region)
+        state.save()
+        blurOn = true
+        refresh()
+        if trackTimer == nil {
+            trackTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 30, repeats: true) { [weak self] _ in self?.followTracked() }
+            RunLoop.main.add(trackTimer!, forMode: .common)
+        }
+    }
+
+    /// Moves picked regions with their items (scrolling, window moves), clipped to the
+    /// item's window so a scrolled-away item doesn't leave a box floating elsewhere.
+    private func followTracked() {
+        guard blurOn, !editing else { return }
+        for (index, region) in state.regions.enumerated() where region.enabled {
+            guard let target = tracked[region.id] else { continue }
+            let found = AX.frame(of: target.element)
+            guard var rect = found.rect else {
+                if found.gone { tracked[region.id] = nil }   // stays blurred at its last position
+                continue
+            }
+            rect = rect.insetBy(dx: -6, dy: -4)
+            if let window = target.window, let bounds = AX.frame(of: window).rect {
+                rect = rect.intersection(bounds)
+            }
+            let hidden = rect.isNull || rect.width < 2 || rect.height < 2
+            if hidden != offscreen.contains(region.id) {
+                if hidden { offscreen.insert(region.id) } else { offscreen.remove(region.id) }
+                if hidden { regionWindows[index].orderOut(nil) } else { regionWindows[index].orderFrontRegardless() }
+            }
+            if !hidden, rect != region.rect {
+                state.regions[index].rect = rect
+                regionWindows[index].setFrame(rect, display: true)
+            }
+        }
+        if tracked.isEmpty {
+            trackTimer?.invalidate()
+            trackTimer = nil
+        }
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        state.save()
     }
 
     @objc private func toggleStyle() {
@@ -630,6 +764,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         add("Auto-detect Sensitive Text", #selector(toggleAuto), key: "a", on: state.autoDetect)
         menu.addItem(.separator())
         add("New Region", #selector(toggleDraw), key: "n")
+        add("Click an Item to Blur It", #selector(togglePick), key: "c", on: clickTap != nil)
         add("Edit Regions", #selector(toggleEdit), key: "e", on: editing)
         for (index, region) in state.regions.enumerated() {
             add("Region \(index + 1)", #selector(toggleRegionItem), key: index < 9 ? "\(index + 1)" : "",

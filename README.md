@@ -22,6 +22,7 @@ meeting app captures only that window and the blur is left out.
 | ⌃⇧F       | Panic: blur the full screen                    |
 | ⌃⇧1–9     | Blur / reveal one region                       |
 | ⌃⇧N       | New region: drag to draw, Esc when done        |
+| ⌃⇧C       | Click an item to blur it, Esc when done        |
 | ⌃⇧E       | Edit regions: drag to move, yellow corner to resize, right-click to delete |
 | ⌃⇧A       | Auto-detect sensitive text on / off            |
 | ⌃⇧S       | Save regions as a preset                       |
@@ -31,6 +32,20 @@ meeting app captures only that window and the blur is left out.
 
 The same actions are in the menu-bar icon, along with a blackout style (solid black
 instead of blur) and the custom-terms list.
+
+## Click to blur
+
+⌃⇧C turns the pointer into a picker: the item under it is outlined in yellow, and a
+click blurs it instead of activating it. It works on anything macOS exposes through
+Accessibility: app controls and text, desktop icons, menu-bar items, browser toolbars
+and web page content.
+
+- Needs Accessibility permission (System Settings → Privacy & Security). The app is
+  ad-hoc signed, so after a rebuild you may have to remove and re-add it there.
+- A picked region follows its item when you scroll or move the window, and hides when
+  the item scrolls out of its window. It trails fast scrolling by a frame or two.
+- If the page re-renders and the item is replaced, the box stays at its last position.
+  After a relaunch, and in presets, picked regions are plain fixed boxes.
 
 ## Auto-detect
 
@@ -45,6 +60,6 @@ custom terms you add. Nothing leaves the machine.
 
 ## Limits
 
-- Regions are fixed screen positions. They do not follow content when you scroll or
-  move a window.
+- Drawn regions are fixed screen positions. They do not follow content when you scroll
+  or move a window; regions picked with ⌃⇧C do.
 - Regions and presets are stored in `~/Library/Application Support/ScreenBlur/state.json`.
