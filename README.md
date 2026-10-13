@@ -26,6 +26,7 @@ meeting app captures only that window and the blur is left out.
 | ⌃⇧E       | Edit regions: drag to move, yellow corner to resize, right-click to delete |
 | ⌃⇧A       | Auto-detect sensitive text on / off            |
 | ⌃⇧T       | Blur all text on / off                         |
+| ⌃⇧V       | Blur only for viewers on / off                 |
 | ⌃⇧S       | Save regions as a preset                       |
 | ⌃⌥⇧1–9    | Load preset 1–9                                |
 | ⌃⇧⌫       | Remove all regions                             |
@@ -72,6 +73,25 @@ one blur. It is off again after a relaunch.
   text shows briefly while you scroll or switch windows. Use manual regions for anything
   that must never be seen, and detection as a backup.
 - OCR misses some text, such as very small, low-contrast or stylised lettering.
+
+## Blur only for viewers
+
+A meeting app records exactly what a display shows, so a blur cannot be in the
+recording without also being on your screen. ⌃⇧V works around that: it adds a
+software-only display called "ScreenBlur" that shows a live copy of your main display
+with the blurs painted in, and takes the blurs off your real screen. In the meeting,
+share the "ScreenBlur" screen instead of your own. You still see the boxes in edit
+mode (⌃⇧E), and none of ScreenBlur's own windows appear in the copy.
+
+- Needs Screen Recording permission, and macOS shows its recording indicator while
+  it is on.
+- Share the "ScreenBlur" screen, not your real one: your real screen has no blur on it
+  in this mode.
+- macOS treats the extra display as a real monitor. It is parked corner to corner with
+  the main display so the pointer does not slide onto it, but a window can still be
+  sent there, where you cannot see it.
+- It copies the main display only, and adds a frame or two of delay for viewers.
+- Off again after a relaunch. It relies on an undocumented macOS feature.
 
 ## Limits
 

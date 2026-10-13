@@ -351,6 +351,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var lastScan: [CGRect] = []
     private var allText = false     // blur every piece of text the detector finds
     private var detecting: Bool { state.autoDetect || allText }
+    // While the shared copy is on, blurs are painted into it instead of onto this screen.
+    private var feed: ShareFeed?
+    private var sharing: Bool { feed != nil }
+    private var realScreens: [NSScreen] {
+        NSScreen.screens.filter {
+            let id = $0.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID
+            return id == nil || id != ShareFeed.displayID
+        }
+    }
     private var shortcutsWindow: NSWindow?
     private var toastWindow: NSPanel?
     private var toastHide: DispatchWorkItem?
@@ -403,6 +412,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         Shortcut(keyCode: kVK_ANSI_E, modifiers: Self.main, keys: "⌃⇧E", title: "Edit regions (move, resize, delete)") { [weak self] in self?.toggleEdit() },
         Shortcut(keyCode: kVK_ANSI_A, modifiers: Self.main, keys: "⌃⇧A", title: "Auto-detect sensitive text on / off") { [weak self] in self?.toggleAuto() },
         Shortcut(keyCode: kVK_ANSI_T, modifiers: Self.main, keys: "⌃⇧T", title: "Blur all text on / off") { [weak self] in self?.toggleAllText() },
+        Shortcut(keyCode: kVK_ANSI_V, modifiers: Self.main, keys: "⌃⇧V", title: "Blur only for viewers (share the “ScreenBlur” display)") { [weak self] in self?.toggleShare() },
         Shortcut(keyCode: kVK_ANSI_S, modifiers: Self.main, keys: "⌃⇧S", title: "Save regions as a preset") { [weak self] in self?.savePreset() },
         Shortcut(keyCode: kVK_Delete, modifiers: Self.main, keys: "⌃⇧⌫", title: "Remove all regions") { [weak self] in self?.removeAll() },
         Shortcut(keyCode: kVK_ANSI_Slash, modifiers: Self.main, keys: "⌃⇧/", title: "Show this list") { [weak self] in self?.showShortcuts() },
@@ -471,10 +481,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             }
             window.blur.onDelete = { [weak self] in self?.removeRegion(index) }
             let visible = blurOn && region.enabled && !offscreen.contains(region.id)
-            if visible || editing { window.orderFrontRegardless() } else { window.orderOut(nil) }
+            if (visible && !sharing) || editing { window.orderFrontRegardless() } else { window.orderOut(nil) }
         }
 
-        let rects = blurOn && detecting ? autoRects : []
+        let rects = blurOn && detecting && !sharing ? autoRects : []
         while autoWindows.count < rects.count { autoWindows.append(BlurWindow(frame: .zero)) }
         for (index, window) in autoWindows.enumerated() {
             guard index < rects.count else { window.orderOut(nil); continue }
@@ -489,6 +499,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         let symbol = panic ? "eye.slash.circle.fill" : (blurOn ? "eye.slash.fill" : "eye")
         statusItem.button?.image = NSImage(systemSymbolName: symbol, accessibilityDescription: "ScreenBlur")
+        syncFeed()
+    }
+
+    /// Hands the shared copy everything that would otherwise be blurred on this screen.
+    private func syncFeed() {
+        guard let feed else { return }
+        var rects: [CGRect] = []
+        if blurOn {
+            rects = state.regions.filter { $0.enabled && !offscreen.contains($0.id) }.map(\.rect)
+            if detecting { rects += autoRects }
+        }
+        feed.update(rects: rects, solid: state.solid, full: panic)
     }
 
     // MARK: Actions
@@ -501,8 +523,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     @objc private func togglePanic() {
         panic.toggle()
+        showPanic()
+    }
+
+    private func showPanic() {
         panicWindows.forEach { $0.orderOut(nil) }
-        panicWindows = panic ? NSScreen.screens.map { BlurWindow(frame: $0.frame) } : []
+        panicWindows = panic && !sharing ? realScreens.map { BlurWindow(frame: $0.frame) } : []
         refresh()
         panicWindows.forEach { $0.orderFrontRegardless() }
     }
@@ -546,7 +572,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         guard drawWindows.isEmpty else { endDraw(); return }
         endPick()
         previousApp = NSWorkspace.shared.frontmostApplication
-        for screen in NSScreen.screens {
+        for screen in realScreens {
             let window = DrawWindow(contentRect: screen.frame, styleMask: .borderless,
                                     backing: .buffered, defer: false)
             window.isOpaque = false
@@ -742,7 +768,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             tracked[region.id] = target.element == nil && target.windowID == nil ? nil : target
             if hidden != offscreen.contains(region.id) {
                 if hidden { offscreen.insert(region.id) } else { offscreen.remove(region.id) }
-                if hidden { regionWindows[index].orderOut(nil) } else { regionWindows[index].orderFrontRegardless() }
+                if hidden { regionWindows[index].orderOut(nil) } else if !sharing { regionWindows[index].orderFrontRegardless() }
             }
             if !hidden, rect != region.rect {
                 state.regions[index].rect = rect
@@ -750,6 +776,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             }
         }
         followTicks += 1
+        syncFeed()
         if tracked.isEmpty {
             trackTimer?.invalidate()
             trackTimer = nil
@@ -757,6 +784,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        feed?.stop()
         state.save()
     }
 
@@ -786,6 +814,37 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if detecting { startDetector() } else { stopDetector() }
         refresh()
         toast(state.autoDetect ? "Auto-detect ON" : "Auto-detect OFF")
+    }
+
+    /// Moves the blur off this screen and into a copy of it on a software display,
+    /// which is what gets shared in the meeting.
+    @objc private func toggleShare() {
+        if let feed {
+            feed.stop()
+            self.feed = nil
+            showPanic()
+            toast("Blur is back on this screen")
+            return
+        }
+        guard canReadScreen(for: "Blur only for viewers") else { return }
+        guard let screen = realScreens.first, let feed = ShareFeed(screen: screen) else { return }
+        feed.onStop = { [weak self] in
+            guard let self, self.feed === feed else { return }
+            feed.stop()
+            self.feed = nil
+            self.showPanic()
+            self.toast("The shared copy stopped. Blur is back on this screen", seconds: 4)
+        }
+        self.feed = feed
+        showPanic()
+        Task { @MainActor in
+            do {
+                try await feed.start()
+                self.toast("Share the “\(ShareFeed.displayName)” display in your meeting", seconds: 5)
+            } catch {
+                feed.onStop?()
+            }
+        }
     }
 
     /// Blurs every piece of text on screen, whatever app, page or desktop it is on.
@@ -900,6 +959,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         add("Panic: Blur Full Screen", #selector(togglePanic), key: "f", on: panic)
         add("Auto-detect Sensitive Text", #selector(toggleAuto), key: "a", on: state.autoDetect)
         add("Blur All Text", #selector(toggleAllText), key: "t", on: allText)
+        add("Blur Only for Viewers", #selector(toggleShare), key: "v", on: sharing)
         menu.addItem(.separator())
         add("New Region", #selector(toggleDraw), key: "n")
         add("Click an Item to Blur It", #selector(togglePick), key: "c", on: clickTap != nil)

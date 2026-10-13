@@ -58,7 +58,7 @@ final class AutoDetector: @unchecked Sendable {
             NSScreen.screens.map { screen in
                 (id: screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID,
                  frame: screen.frame, scale: screen.backingScaleFactor)
-            }
+            }.filter { $0.id != ShareFeed.displayID }   // the shared copy is not worth reading twice
         }
         let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
         let me = content.applications.filter { $0.processID == getpid() }
