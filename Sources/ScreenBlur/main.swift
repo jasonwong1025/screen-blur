@@ -90,6 +90,7 @@ enum OverlaySpace {
     private typealias SpaceSetLevel = @convention(c) (Int32, UInt64, Int32) -> Int32
     private typealias ShowSpaces = @convention(c) (Int32, CFArray) -> Int32
     private typealias AddWindows = @convention(c) (Int32, UInt64, CFArray, Int32) -> Int32
+    private typealias SetBlurRadius = @convention(c) (Int32, Int32, Int32) -> Int32
 
     private static let skyLight = dlopen("/System/Library/PrivateFrameworks/SkyLight.framework/SkyLight", RTLD_NOW)
 
@@ -112,6 +113,14 @@ enum OverlaySpace {
     }()
 
     static var isAvailable: Bool { space != nil }
+
+    /// Blurs whatever is behind a window with no material on top, so it reads as
+    /// clear glass rather than a tinted panel. Returns false if the API is gone.
+    static func setBlur(_ window: NSWindow, radius: Int32) -> Bool {
+        guard window.windowNumber > 0, let main: MainConnection = symbol("SLSMainConnectionID"),
+              let set: SetBlurRadius = symbol("SLSSetWindowBackgroundBlurRadius") else { return false }
+        return set(main(), Int32(window.windowNumber), radius) == 0
+    }
 
     static func pin(_ window: NSWindow) {
         guard let space, let add: AddWindows = symbol("SLSSpaceAddWindowsAndRemoveFromSpaces") else { return }
@@ -137,7 +146,9 @@ final class BlurView: NSView {
     override init(frame: NSRect) {
         super.init(frame: frame)
         wantsLayer = true
+        // Fallback only: the material adds a milky fill that the plain blur avoids.
         effect.material = .fullScreenUI
+        effect.appearance = NSAppearance(named: .vibrantLight)
         effect.blendingMode = .behindWindow
         effect.state = .active
         tint.wantsLayer = true
@@ -147,7 +158,6 @@ final class BlurView: NSView {
             addSubview(view)
         }
         badge.font = .boldSystemFont(ofSize: 10)
-        badge.textColor = NSColor.white.withAlphaComponent(0.75)
         addSubview(badge)
         handle.backgroundColor = NSColor.systemYellow.cgColor
         layer?.addSublayer(handle)
@@ -155,13 +165,24 @@ final class BlurView: NSView {
 
     required init?(coder: NSCoder) { fatalError() }
 
+    /// Keeps the white number readable over light content now that nothing darkens it.
+    private static let badgeShadow: NSShadow = {
+        let shadow = NSShadow()
+        shadow.shadowColor = NSColor.black.withAlphaComponent(0.8)
+        shadow.shadowBlurRadius = 2
+        return shadow
+    }()
+
     /// `active` false draws only the edit outline (a region that is toggled off).
     func configure(number: Int?, solid: Bool, active: Bool, editing: Bool) {
         self.editing = editing
-        effect.isHidden = solid || !active
+        let clear = window.map { OverlaySpace.setBlur($0, radius: active && !solid ? 24 : 0) } ?? false
+        effect.isHidden = solid || !active || clear
         tint.isHidden = !active
         tint.layer?.backgroundColor = solid ? NSColor.black.cgColor
-                                            : NSColor(white: 0.35, alpha: 0.45).cgColor
+                                            : NSColor(white: 1, alpha: clear ? 0.04 : 0.08).cgColor
+        badge.textColor = NSColor.white.withAlphaComponent(0.75)
+        badge.shadow = Self.badgeShadow
         badge.stringValue = number.map(String.init) ?? ""
         badge.sizeToFit()
         layer?.borderWidth = editing ? 2 : 0
