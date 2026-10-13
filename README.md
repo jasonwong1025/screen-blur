@@ -21,6 +21,7 @@ meeting app captures only that window and the blur is left out.
 | ⌃⇧B       | Blur on / off (all regions)                    |
 | ⌃⇧F       | Panic: blur the full screen                    |
 | ⌃⇧1–9     | Blur / reveal one region                       |
+| Hold ⌃⌥   | Peek: reveal the blur under the pointer        |
 | ⌃⇧N       | New region: drag to draw, Esc when done        |
 | ⌃⇧C       | Click an item to blur it, Esc when done        |
 | ⌃⇧E       | Edit regions: drag to move, yellow corner to resize, right-click to delete |
@@ -31,6 +32,11 @@ meeting app captures only that window and the blur is left out.
 | ⌃⌥⇧1–9    | Load preset 1–9                                |
 | ⌃⇧⌫       | Remove all regions                             |
 | ⌃⇧/       | Show the shortcut list                         |
+
+Peek lifts only the blur the pointer is over, after a fifth of a second of holding
+⌃⌥, and puts it back the moment the pointer leaves it or you let go. It works on drawn,
+picked and auto-detected blurs, not on the full-screen panic blur. The blur is lifted
+for viewers too, so use it when you mean to show the item.
 
 The same actions are in the menu-bar icon, along with a blackout style (solid black
 instead of blur) and the custom-terms list.

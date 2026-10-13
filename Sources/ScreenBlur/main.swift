@@ -351,6 +351,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var lastScan: [CGRect] = []
     private var allText = false     // blur every piece of text the detector finds
     private var detecting: Bool { state.autoDetect || allText }
+    // Peek: while ⌃⌥ is held, whatever blur the pointer is over is lifted.
+    private static let peekKeys: NSEvent.ModifierFlags = [.control, .option]
+    private var peekHeldSince: Date?
+    private var peekPoint: NSPoint?     // pointer position while peeking, otherwise nil
+    private var peekedRects: [CGRect] = []
     // While the shared copy is on, blurs are painted into it instead of onto this screen.
     private var feed: ShareFeed?
     private var sharing: Bool { feed != nil }
@@ -432,6 +437,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if state.autoDetect { startDetector() }
         refresh()
         if firstLaunch { showShortcuts() }
+
+        // Reading the modifier state needs no permission, unlike watching key events.
+        let peekTimer = Timer(timeInterval: 1.0 / 30, repeats: true) { [weak self] _ in self?.updatePeek() }
+        peekTimer.tolerance = 0.01
+        RunLoop.main.add(peekTimer, forMode: .common)
     }
 
     private func registerHotKeys() {
@@ -480,11 +490,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 self.state.save()
             }
             window.blur.onDelete = { [weak self] in self?.removeRegion(index) }
-            let visible = blurOn && region.enabled && !offscreen.contains(region.id)
+            let visible = blurOn && region.enabled && !offscreen.contains(region.id) && !isPeeked(region.rect)
             if (visible && !sharing) || editing { window.orderFrontRegardless() } else { window.orderOut(nil) }
         }
 
-        let rects = blurOn && detecting && !sharing ? autoRects : []
+        let rects = blurOn && detecting && !sharing ? autoRects.filter { !isPeeked($0) } : []
         while autoWindows.count < rects.count { autoWindows.append(BlurWindow(frame: .zero)) }
         for (index, window) in autoWindows.enumerated() {
             guard index < rects.count else { window.orderOut(nil); continue }
@@ -502,6 +512,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         syncFeed()
     }
 
+    private func isPeeked(_ rect: CGRect) -> Bool {
+        peekPoint.map(rect.contains) ?? false
+    }
+
+    /// Lifts the blur under the pointer while the peek keys are held, and puts it
+    /// back as soon as the pointer leaves it or the keys are released.
+    private func updatePeek() {
+        let held = NSEvent.modifierFlags.intersection([.control, .option, .shift, .command]) == Self.peekKeys
+        if !held { peekHeldSince = nil } else if peekHeldSince == nil { peekHeldSince = Date() }
+        // A short hold, so passing through these keys on the way to a shortcut reveals nothing.
+        let active = blurOn && !editing && !panic && (peekHeldSince.map { Date().timeIntervalSince($0) >= 0.2 } ?? false)
+        peekPoint = active ? NSEvent.mouseLocation : nil
+        var rects: [CGRect] = []
+        if active {
+            rects = state.regions.filter { $0.enabled }.map(\.rect) + (detecting ? autoRects : [])
+            rects = rects.filter(isPeeked)
+        }
+        guard rects != peekedRects else { return }
+        peekedRects = rects
+        refresh()
+    }
+
     /// Hands the shared copy everything that would otherwise be blurred on this screen.
     private func syncFeed() {
         guard let feed else { return }
@@ -509,6 +541,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if blurOn {
             rects = state.regions.filter { $0.enabled && !offscreen.contains($0.id) }.map(\.rect)
             if detecting { rects += autoRects }
+            rects = rects.filter { !isPeeked($0) }
         }
         feed.update(rects: rects, solid: state.solid, full: panic)
     }
@@ -768,7 +801,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             tracked[region.id] = target.element == nil && target.windowID == nil ? nil : target
             if hidden != offscreen.contains(region.id) {
                 if hidden { offscreen.insert(region.id) } else { offscreen.remove(region.id) }
-                if hidden { regionWindows[index].orderOut(nil) } else if !sharing { regionWindows[index].orderFrontRegardless() }
+                if hidden { regionWindows[index].orderOut(nil) } else if !sharing, !isPeeked(rect) { regionWindows[index].orderFrontRegardless() }
             }
             if !hidden, rect != region.rect {
                 state.regions[index].rect = rect
@@ -1016,6 +1049,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             var rows = shortcuts.map { ($0.keys, $0.title) }
             rows.insert(("⌃⇧1–9", "Blur / reveal one region"), at: 2)
             rows.insert(("⌃⌥⇧1–9", "Load preset 1–9"), at: rows.count - 2)
+            rows.insert(("Hold ⌃⌥", "Peek: reveal the blur under the pointer"), at: 3)
 
             let text = NSMutableAttributedString()
             for (keys, title) in rows {
