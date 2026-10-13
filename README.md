@@ -40,10 +40,14 @@ click blurs it instead of activating it. It works on anything macOS exposes thro
 Accessibility: app controls and text, desktop icons, menu-bar items, browser toolbars
 and web page content.
 
-- Needs Accessibility permission (System Settings → Privacy & Security). The app is
-  ad-hoc signed, so after a rebuild you may have to remove and re-add it there.
+- Needs Accessibility permission (System Settings → Privacy & Security). `build.sh`
+  signs with your Apple Development certificate when you have one, so the grant survives
+  rebuilds; with an ad-hoc signature you have to remove and re-add the app after each one.
 - A picked region follows its item when you scroll or move the window, and hides when
-  the item scrolls out of its window. It trails fast scrolling by a frame or two.
+  the item scrolls out of its window. It belongs to that window: it disappears when you
+  swipe to another Space or full-screen app, switch browser tab, minimise or hide the
+  window, or cover the item with another window, and comes back when the item does.
+  Drawn regions stay on every Space. It trails fast scrolling, and a swipe, by a frame or two.
 - If the page re-renders and the item is replaced, the box stays at its last position.
   After a relaunch, and in presets, picked regions are plain fixed boxes.
 

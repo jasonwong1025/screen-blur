@@ -76,6 +76,39 @@ enum AX {
               let window, CFGetTypeID(window) == AXUIElementGetTypeID() else { return nil }
         return (window as! AXUIElement)
     }
+
+    /// The outermost web page an element sits in, if any. Browsers give each tab its own.
+    static func webArea(of element: AXUIElement) -> AXUIElement? {
+        var area: AXUIElement?
+        var current = element
+        for _ in 0..<80 {
+            var role: CFTypeRef?
+            AXUIElementCopyAttributeValue(current, kAXRoleAttribute as CFString, &role)
+            if role as? String == "AXWebArea" { area = current }
+            var parent: CFTypeRef?
+            guard AXUIElementCopyAttributeValue(current, kAXParentAttribute as CFString, &parent) == .success,
+                  let parent, CFGetTypeID(parent) == AXUIElementGetTypeID() else { break }
+            current = parent as! AXUIElement
+        }
+        return area
+    }
+
+    /// The web page an app is showing at a Cocoa screen point, whatever is in front of it.
+    static func webArea(at point: NSPoint, pid: pid_t) -> AXUIElement? {
+        var hit: AXUIElement?
+        AXUIElementCopyElementAtPosition(AXUIElementCreateApplication(pid),
+                                         Float(point.x), Float(primaryHeight - point.y), &hit)
+        return hit.flatMap(webArea)
+    }
+
+    /// Window-server ID of an AX window, via the private call every window tool relies on.
+    static func windowID(of window: AXUIElement) -> CGWindowID? {
+        typealias GetWindow = @convention(c) (AXUIElement, UnsafeMutablePointer<CGWindowID>) -> AXError
+        guard let pointer = dlsym(UnsafeMutableRawPointer(bitPattern: -2), "_AXUIElementGetWindow") else { return nil }
+        var id: CGWindowID = 0
+        let error = unsafeBitCast(pointer, to: GetWindow.self)(window, &id)
+        return error == .success && id != 0 ? id : nil
+    }
 }
 
 // MARK: - Click capture

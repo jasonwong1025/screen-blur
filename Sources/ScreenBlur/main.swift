@@ -334,7 +334,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var unavailableKeys: [String] = []
 
     // Regions picked by clicking an item follow that item while it still exists.
-    private var tracked: [UUID: (element: AXUIElement, window: AXUIElement?)] = [:]
+    private struct Tracked {
+        var element: AXUIElement?       // nil once the item itself has been replaced
+        let window: AXUIElement?
+        let windowID: CGWindowID?
+        let webArea: AXUIElement?       // the browser tab's page, when the item is on one
+        let pid: pid_t
+        var otherTab = false
+    }
+    private var tracked: [UUID: Tracked] = [:]
+    private var followTicks = 0
     private var offscreen: Set<UUID> = []
     private var trackTimer: Timer?
     private var clickTap: ClickTap?
@@ -591,7 +600,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         updateHover()
         guard let hovered else { return }
         let region = Region(rect: hovered.rect.insetBy(dx: -6, dy: -4))
-        tracked[region.id] = (hovered.element, AX.window(of: hovered.element))
+        let window = AX.window(of: hovered.element)
+        tracked[region.id] = Tracked(element: hovered.element, window: window, windowID: window.flatMap(AX.windowID),
+                                     webArea: AX.webArea(of: hovered.element), pid: AX.pid(of: hovered.element))
         state.regions.append(region)
         state.save()
         blurOn = true
@@ -602,22 +613,54 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
+    /// Whether a window is on the current Space and not hiding `rect` (Cocoa
+    /// coordinates) behind another window. `stack` is the on-screen list, front first.
+    private func isShowing(_ windowID: CGWindowID, _ rect: CGRect, in stack: [[CFString: Any]]) -> Bool {
+        let height = NSScreen.screens.first?.frame.height ?? 0
+        let flipped = CGRect(x: rect.minX, y: height - rect.maxY, width: rect.width, height: rect.height)
+        for window in stack {
+            if window[kCGWindowNumber] as? CGWindowID == windowID { return true }
+            guard window[kCGWindowOwnerPID] as? pid_t != getpid(), window[kCGWindowLayer] as? Int == 0,
+                  window[kCGWindowAlpha] as? Double ?? 1 > 0.01,
+                  let bounds = window[kCGWindowBounds] as? NSDictionary,
+                  let frame = CGRect(dictionaryRepresentation: bounds) else { continue }
+            if frame.contains(flipped) { return false }   // covered by a window in front
+        }
+        return false   // minimised, hidden, or on another Space
+    }
+
     /// Moves picked regions with their items (scrolling, window moves), clipped to the
     /// item's window so a scrolled-away item doesn't leave a box floating elsewhere.
+    /// A region shows only while its window is on screen, uncovered, and on the same tab.
     private func followTracked() {
         guard blurOn, !editing else { return }
+        let stack = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements],
+                                               kCGNullWindowID) as? [[CFString: Any]] ?? []
         for (index, region) in state.regions.enumerated() where region.enabled {
-            guard let target = tracked[region.id] else { continue }
-            let found = AX.frame(of: target.element)
-            guard var rect = found.rect else {
-                if found.gone { tracked[region.id] = nil }   // stays blurred at its last position
-                continue
+            guard var target = tracked[region.id] else { continue }
+            var rect = region.rect
+            if let element = target.element {
+                let found = AX.frame(of: element)
+                if let frame = found.rect {
+                    rect = frame.insetBy(dx: -6, dy: -4)
+                    if let window = target.window, let bounds = AX.frame(of: window).rect {
+                        rect = rect.intersection(bounds)
+                    }
+                } else if found.gone {
+                    target.element = nil   // stays blurred at its last position
+                }
             }
-            rect = rect.insetBy(dx: -6, dy: -4)
-            if let window = target.window, let bounds = AX.frame(of: window).rect {
-                rect = rect.intersection(bounds)
+            var hidden = rect.isNull || rect.width < 2 || rect.height < 2
+            if !hidden, let windowID = target.windowID { hidden = !isShowing(windowID, rect, in: stack) }
+            // Asking the app what is at the spot costs more, so it runs less often,
+            // except while hidden so the blur is back the moment its tab is.
+            if !hidden, let area = target.webArea, followTicks % 6 == 0 || offscreen.contains(region.id) {
+                let shown = AX.webArea(at: NSPoint(x: rect.midX, y: rect.midY), pid: target.pid)
+                target.otherTab = shown.map { !CFEqual($0, area) } ?? false
             }
-            let hidden = rect.isNull || rect.width < 2 || rect.height < 2
+            hidden = hidden || target.otherTab
+            // With neither the item nor its window left to watch, it is a plain fixed box.
+            tracked[region.id] = target.element == nil && target.windowID == nil ? nil : target
             if hidden != offscreen.contains(region.id) {
                 if hidden { offscreen.insert(region.id) } else { offscreen.remove(region.id) }
                 if hidden { regionWindows[index].orderOut(nil) } else { regionWindows[index].orderFrontRegardless() }
@@ -627,6 +670,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 regionWindows[index].setFrame(rect, display: true)
             }
         }
+        followTicks += 1
         if tracked.isEmpty {
             trackTimer?.invalidate()
             trackTimer = nil

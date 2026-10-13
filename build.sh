@@ -28,5 +28,9 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
 </plist>
 PLIST
 
-codesign --force --sign - "$APP"
+# Sign with a stable identity when one exists: macOS ties the Accessibility
+# grant to the signature, and an ad-hoc one changes on every rebuild, which
+# silently invalidates the grant. Override with CODESIGN_IDENTITY=... (or "-").
+IDENTITY="${CODESIGN_IDENTITY:-$(security find-identity -v -p codesigning | awk '/Apple Development|Developer ID Application/ {print $2; exit}')}"
+codesign --force --sign "${IDENTITY:--}" "$APP"
 echo "Built $APP"
