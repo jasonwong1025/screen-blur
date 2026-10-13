@@ -25,6 +25,7 @@ meeting app captures only that window and the blur is left out.
 | ⌃⇧C       | Click an item to blur it, Esc when done        |
 | ⌃⇧E       | Edit regions: drag to move, yellow corner to resize, right-click to delete |
 | ⌃⇧A       | Auto-detect sensitive text on / off            |
+| ⌃⇧T       | Blur all text on / off                         |
 | ⌃⇧S       | Save regions as a preset                       |
 | ⌃⌥⇧1–9    | Load preset 1–9                                |
 | ⌃⇧⌫       | Remove all regions                             |
@@ -61,13 +62,19 @@ Screenshots each display about twice a second, runs on-device OCR, and blurs ema
 phone numbers, card numbers, API keys and tokens, `password: value` pairs, and any
 custom terms you add. Nothing leaves the machine.
 
-- Needs Screen Recording permission (System Settings → Privacy & Security). The app is
-  ad-hoc signed, so macOS asks again after each rebuild.
-- It lags: newly shown text is visible for up to a second before it is covered. Use
-  manual regions for anything that must never be seen, and auto-detect as a backup.
+⌃⇧T blurs all text instead: every piece of text the OCR finds on any display, in any
+app, web page or on the desktop, in any language, with neighbouring lines joined into
+one blur. It is off again after a relaunch.
+
+- Needs Screen Recording permission (System Settings → Privacy & Security). With an
+  ad-hoc signature macOS asks again after each rebuild.
+- It lags: newly shown text is visible for up to a second before it is covered, so
+  text shows briefly while you scroll or switch windows. Use manual regions for anything
+  that must never be seen, and detection as a backup.
+- OCR misses some text, such as very small, low-contrast or stylised lettering.
 
 ## Limits
 
-- Drawn regions are fixed screen positions. They do not follow content when you scroll
-  or move a window; regions picked with ⌃⇧C do.
+- Drawn regions keep their place inside their window. They do not follow content when
+  you scroll; regions picked with ⌃⇧C do.
 - Regions and presets are stored in `~/Library/Application Support/ScreenBlur/state.json`.

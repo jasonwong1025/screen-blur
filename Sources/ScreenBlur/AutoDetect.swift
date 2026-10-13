@@ -5,8 +5,8 @@ import Vision
 // MARK: - Auto-detect (screen capture + OCR, needs Screen Recording permission)
 
 /// Repeatedly screenshots every display, OCRs it, and reports the screen rects of
-/// text that looks sensitive. Our own windows are excluded from the capture so the
-/// blur never hides the text from the detector.
+/// text that looks sensitive, or of all text when `allText` is set. Our own windows
+/// are excluded from the capture so the blur never hides the text from the detector.
 final class AutoDetector: @unchecked Sendable {
     // A pattern with a capture group blurs only group 1; otherwise the whole match.
     private static let builtIn = [
@@ -22,10 +22,12 @@ final class AutoDetector: @unchecked Sendable {
     ]
 
     private let patterns: [NSRegularExpression]
+    private let allText: Bool
     private let onResult: @MainActor ([CGRect]) -> Void
     private var task: Task<Void, Never>?
 
-    init(customTerms: [String], onResult: @escaping @MainActor ([CGRect]) -> Void) {
+    init(customTerms: [String], allText: Bool = false, onResult: @escaping @MainActor ([CGRect]) -> Void) {
+        self.allText = allText
         let custom = customTerms.map { NSRegularExpression.escapedPattern(for: $0) }
         patterns = (Self.builtIn + custom).compactMap {
             try? NSRegularExpression(pattern: $0, options: .caseInsensitive)
@@ -78,7 +80,18 @@ final class AutoDetector: @unchecked Sendable {
         let request = VNRecognizeTextRequest()
         request.recognitionLevel = .accurate
         request.usesLanguageCorrection = false
+        // Without this only Latin text is found; Chinese and other scripts are skipped.
+        request.automaticallyDetectsLanguage = allText
         try VNImageRequestHandler(cgImage: image).perform([request])
+
+        // Vision boxes are normalized with a bottom-left origin, same as Cocoa screens.
+        func screenRect(_ box: CGRect) -> CGRect {
+            CGRect(x: frame.minX + box.minX * frame.width, y: frame.minY + box.minY * frame.height,
+                   width: box.width * frame.width, height: box.height * frame.height).insetBy(dx: -8, dy: -5)
+        }
+        if allText {
+            return Self.merge((request.results ?? []).map { screenRect($0.boundingBox) })
+        }
 
         var rects: [CGRect] = []
         for observation in request.results ?? [] {
@@ -90,14 +103,24 @@ final class AutoDetector: @unchecked Sendable {
                     guard group.location != NSNotFound,
                           let range = Range(group, in: text),
                           let box = try? candidate.boundingBox(for: range)?.boundingBox else { continue }
-                    // Vision boxes are normalized with a bottom-left origin, same as Cocoa screens.
-                    rects.append(CGRect(x: frame.minX + box.minX * frame.width,
-                                        y: frame.minY + box.minY * frame.height,
-                                        width: box.width * frame.width,
-                                        height: box.height * frame.height).insetBy(dx: -8, dy: -5))
+                    rects.append(screenRect(box))
                 }
             }
         }
         return rects
+    }
+
+    /// Joins boxes that touch or nearly touch, so a paragraph becomes one blur
+    /// instead of a window per line.
+    private static func merge(_ rects: [CGRect]) -> [CGRect] {
+        var merged: [CGRect] = []
+        for rect in rects {
+            var current = rect
+            while let index = merged.firstIndex(where: { $0.insetBy(dx: -4, dy: -4).intersects(current) }) {
+                current = current.union(merged.remove(at: index))
+            }
+            merged.append(current)
+        }
+        return merged
     }
 }

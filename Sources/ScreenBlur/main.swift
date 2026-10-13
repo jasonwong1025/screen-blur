@@ -349,6 +349,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var detector: AutoDetector?
     private var autoRects: [CGRect] = []
     private var lastScan: [CGRect] = []
+    private var allText = false     // blur every piece of text the detector finds
+    private var detecting: Bool { state.autoDetect || allText }
     private var shortcutsWindow: NSWindow?
     private var toastWindow: NSPanel?
     private var toastHide: DispatchWorkItem?
@@ -400,6 +402,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         Shortcut(keyCode: kVK_ANSI_C, modifiers: Self.main, keys: "⌃⇧C", title: "Click an item to blur it") { [weak self] in self?.togglePick() },
         Shortcut(keyCode: kVK_ANSI_E, modifiers: Self.main, keys: "⌃⇧E", title: "Edit regions (move, resize, delete)") { [weak self] in self?.toggleEdit() },
         Shortcut(keyCode: kVK_ANSI_A, modifiers: Self.main, keys: "⌃⇧A", title: "Auto-detect sensitive text on / off") { [weak self] in self?.toggleAuto() },
+        Shortcut(keyCode: kVK_ANSI_T, modifiers: Self.main, keys: "⌃⇧T", title: "Blur all text on / off") { [weak self] in self?.toggleAllText() },
         Shortcut(keyCode: kVK_ANSI_S, modifiers: Self.main, keys: "⌃⇧S", title: "Save regions as a preset") { [weak self] in self?.savePreset() },
         Shortcut(keyCode: kVK_Delete, modifiers: Self.main, keys: "⌃⇧⌫", title: "Remove all regions") { [weak self] in self?.removeAll() },
         Shortcut(keyCode: kVK_ANSI_Slash, modifiers: Self.main, keys: "⌃⇧/", title: "Show this list") { [weak self] in self?.showShortcuts() },
@@ -471,7 +474,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             if visible || editing { window.orderFrontRegardless() } else { window.orderOut(nil) }
         }
 
-        let rects = blurOn && state.autoDetect ? autoRects : []
+        let rects = blurOn && detecting ? autoRects : []
         while autoWindows.count < rects.count { autoWindows.append(BlurWindow(frame: .zero)) }
         for (index, window) in autoWindows.enumerated() {
             guard index < rects.count else { window.orderOut(nil); continue }
@@ -765,26 +768,40 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     // MARK: Auto-detect
 
+    /// Both detection modes read the screen, so both need Screen Recording permission.
+    private func canReadScreen(for feature: String) -> Bool {
+        guard !CGPreflightScreenCaptureAccess() else { return true }
+        CGRequestScreenCaptureAccess()
+        let alert = NSAlert()
+        alert.messageText = "\(feature) needs Screen Recording permission"
+        alert.informativeText = "ScreenBlur reads the screen on this Mac to find the text to blur. Nothing leaves the machine.\n\nAllow ScreenBlur under System Settings → Privacy & Security → Screen & System Audio Recording, then relaunch it and turn this on again."
+        present(alert)
+        return false
+    }
+
     @objc private func toggleAuto() {
-        if !state.autoDetect && !CGPreflightScreenCaptureAccess() {
-            CGRequestScreenCaptureAccess()
-            let alert = NSAlert()
-            alert.messageText = "Auto-detect needs Screen Recording permission"
-            alert.informativeText = "ScreenBlur reads the screen on this Mac to find emails, keys and other sensitive text. Nothing leaves the machine.\n\nAllow ScreenBlur under System Settings → Privacy & Security → Screen & System Audio Recording, then relaunch it and turn auto-detect on again."
-            present(alert)
-            return
-        }
+        guard state.autoDetect || canReadScreen(for: "Auto-detect") else { return }
         state.autoDetect.toggle()
         state.save()
-        if state.autoDetect { startDetector() } else { stopDetector() }
+        if detecting { startDetector() } else { stopDetector() }
         refresh()
         toast(state.autoDetect ? "Auto-detect ON" : "Auto-detect OFF")
     }
 
+    /// Blurs every piece of text on screen, whatever app, page or desktop it is on.
+    @objc private func toggleAllText() {
+        guard allText || canReadScreen(for: "Blur all text") else { return }
+        allText.toggle()
+        if allText { blurOn = true }
+        if detecting { startDetector() } else { stopDetector() }
+        refresh()
+        toast(allText ? "Blur all text ON" : "Blur all text OFF")
+    }
+
     private func startDetector() {
         stopDetector()
-        detector = AutoDetector(customTerms: state.customTerms) { [weak self] rects in
-            guard let self, self.state.autoDetect else { return }
+        detector = AutoDetector(customTerms: state.customTerms, allText: allText) { [weak self] rects in
+            guard let self, self.detecting else { return }
             // Keep the previous scan's boxes too, so one missed OCR pass doesn't flash the text.
             self.autoRects = rects + self.lastScan
             self.lastScan = rects
@@ -814,7 +831,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         state.customTerms = field.stringValue.split(separator: ",")
             .map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
         state.save()
-        if state.autoDetect { startDetector() }
+        if detecting { startDetector() }
     }
 
     // MARK: Presets
@@ -882,6 +899,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         add("Blur On", #selector(toggleBlur), key: "b", on: blurOn)
         add("Panic: Blur Full Screen", #selector(togglePanic), key: "f", on: panic)
         add("Auto-detect Sensitive Text", #selector(toggleAuto), key: "a", on: state.autoDetect)
+        add("Blur All Text", #selector(toggleAllText), key: "t", on: allText)
         menu.addItem(.separator())
         add("New Region", #selector(toggleDraw), key: "n")
         add("Click an Item to Blur It", #selector(togglePick), key: "c", on: clickTap != nil)
