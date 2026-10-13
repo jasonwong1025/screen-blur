@@ -95,6 +95,7 @@ enum AX {
 
     /// The web page an app is showing at a Cocoa screen point, whatever is in front of it.
     static func webArea(at point: NSPoint, pid: pid_t) -> AXUIElement? {
+        prepare(pid)
         var hit: AXUIElement?
         AXUIElementCopyElementAtPosition(AXUIElementCreateApplication(pid),
                                          Float(point.x), Float(primaryHeight - point.y), &hit)

@@ -47,8 +47,12 @@ and web page content.
   the item scrolls out of its window. It belongs to that window: it disappears when you
   swipe to another Space or full-screen app, switch browser tab, minimise or hide the
   window, or cover the item with another window, and comes back when the item does.
-  Drawn regions stay on every Space. It trails fast scrolling, and a swipe, by a frame or two.
-- If the page re-renders and the item is replaced, the box stays at its last position.
+  It trails fast scrolling, and a swipe, by a frame or two.
+- A drawn region belongs to the window it was drawn over in the same way, and moves with
+  that window, but keeps its place inside it rather than following scrolled content.
+  Drawn over the bare desktop it stays a fixed box on every Space. Following browser
+  tabs needs the Accessibility permission; the rest works without it.
+- If the page re-renders and the item is replaced, the box keeps its last place inside the window.
   After a relaunch, and in presets, picked regions are plain fixed boxes.
 
 ## Auto-detect

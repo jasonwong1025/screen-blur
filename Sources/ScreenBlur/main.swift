@@ -359,9 +359,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         var element: AXUIElement?       // nil once the item itself has been replaced
         let window: AXUIElement?
         let windowID: CGWindowID?
-        let webArea: AXUIElement?       // the browser tab's page, when the item is on one
+        var webArea: AXUIElement?       // the browser tab's page, when the item is on one
         let pid: pid_t
         var otherTab = false
+        // Without an item to follow, the box keeps its place inside the window:
+        // distance from the window's top-left corner, and its full size.
+        var offset: CGPoint?
+        var size = CGSize.zero
+        var areaTries = 0               // a browser may need a moment before it reports its page
     }
     private var tracked: [UUID: Tracked] = [:]
     private var followTicks = 0
@@ -458,7 +463,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             window.blur.onChange = { [weak self] frame in
                 guard let self, self.state.regions.indices.contains(index) else { return }
                 self.state.regions[index].rect = frame
-                self.tracked[self.state.regions[index].id] = nil   // moved by hand: stop following
+                self.anchor(self.state.regions[index])   // moved by hand: follows the window it is over now
                 self.state.save()
             }
             window.blur.onDelete = { [weak self] in self?.removeRegion(index) }
@@ -567,7 +572,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     private func addRegion(_ rect: CGRect) {
-        state.regions.append(Region(rect: rect))
+        let region = Region(rect: rect)
+        state.regions.append(region)
+        anchor(region)
         state.save()
         blurOn = true
         refresh()
@@ -628,24 +635,60 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         state.save()
         blurOn = true
         refresh()
-        if trackTimer == nil {
-            trackTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 30, repeats: true) { [weak self] _ in self?.followTracked() }
-            RunLoop.main.add(trackTimer!, forMode: .common)
+        startFollowing()
+    }
+
+    private func startFollowing() {
+        guard trackTimer == nil else { return }
+        trackTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 30, repeats: true) { [weak self] _ in self?.followTracked() }
+        RunLoop.main.add(trackTimer!, forMode: .common)
+    }
+
+    private func windowStack() -> [[CFString: Any]] {
+        CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[CFString: Any]] ?? []
+    }
+
+    /// A window's frame in Cocoa coordinates, from the on-screen list.
+    private func frame(of window: [CFString: Any]) -> CGRect? {
+        guard let bounds = window[kCGWindowBounds] as? NSDictionary,
+              let rect = CGRect(dictionaryRepresentation: bounds) else { return nil }
+        let height = NSScreen.screens.first?.frame.height ?? 0
+        return CGRect(x: rect.minX, y: height - rect.maxY, width: rect.width, height: rect.height)
+    }
+
+    private func frame(of windowID: CGWindowID, in stack: [[CFString: Any]]) -> CGRect? {
+        stack.first { $0[kCGWindowNumber] as? CGWindowID == windowID }.flatMap(frame)
+    }
+
+    /// Ties a drawn or hand-moved region to the window it sits on, so it moves, hides
+    /// and returns with that window. Over the bare desktop it stays a fixed box.
+    private func anchor(_ region: Region) {
+        let centre = CGPoint(x: region.rect.midX, y: region.rect.midY)
+        let under = windowStack().first {
+            $0[kCGWindowOwnerPID] as? pid_t != getpid() && $0[kCGWindowLayer] as? Int == 0
+                && frame(of: $0)?.contains(centre) == true
         }
+        guard let under, let windowID = under[kCGWindowNumber] as? CGWindowID,
+              let pid = under[kCGWindowOwnerPID] as? pid_t, let bounds = frame(of: under) else {
+            tracked[region.id] = nil
+            return
+        }
+        var target = Tracked(element: nil, window: nil, windowID: windowID, webArea: nil, pid: pid)
+        target.offset = CGPoint(x: region.rect.minX - bounds.minX, y: bounds.maxY - region.rect.maxY)
+        target.size = region.rect.size
+        target.areaTries = AXIsProcessTrusted() ? 5 : 0   // tab following needs Accessibility; never prompt for it here
+        tracked[region.id] = target
+        startFollowing()
     }
 
     /// Whether a window is on the current Space and not hiding `rect` (Cocoa
     /// coordinates) behind another window. `stack` is the on-screen list, front first.
     private func isShowing(_ windowID: CGWindowID, _ rect: CGRect, in stack: [[CFString: Any]]) -> Bool {
-        let height = NSScreen.screens.first?.frame.height ?? 0
-        let flipped = CGRect(x: rect.minX, y: height - rect.maxY, width: rect.width, height: rect.height)
         for window in stack {
             if window[kCGWindowNumber] as? CGWindowID == windowID { return true }
             guard window[kCGWindowOwnerPID] as? pid_t != getpid(), window[kCGWindowLayer] as? Int == 0,
-                  window[kCGWindowAlpha] as? Double ?? 1 > 0.01,
-                  let bounds = window[kCGWindowBounds] as? NSDictionary,
-                  let frame = CGRect(dictionaryRepresentation: bounds) else { continue }
-            if frame.contains(flipped) { return false }   // covered by a window in front
+                  window[kCGWindowAlpha] as? Double ?? 1 > 0.01, let frame = frame(of: window) else { continue }
+            if frame.contains(rect) { return false }   // covered by a window in front
         }
         return false   // minimised, hidden, or on another Space
     }
@@ -655,8 +698,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// A region shows only while its window is on screen, uncovered, and on the same tab.
     private func followTracked() {
         guard blurOn, !editing else { return }
-        let stack = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements],
-                                               kCGNullWindowID) as? [[CFString: Any]] ?? []
+        let stack = windowStack()
         for (index, region) in state.regions.enumerated() where region.enabled {
             guard var target = tracked[region.id] else { continue }
             var rect = region.rect
@@ -668,11 +710,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                         rect = rect.intersection(bounds)
                     }
                 } else if found.gone {
-                    target.element = nil   // stays blurred at its last position
+                    // The item was replaced: keep the box where it was inside the window.
+                    target.element = nil
+                    if let windowID = target.windowID, let bounds = frame(of: windowID, in: stack) {
+                        target.offset = CGPoint(x: rect.minX - bounds.minX, y: bounds.maxY - rect.maxY)
+                        target.size = rect.size
+                    }
                 }
+            } else if let offset = target.offset, let windowID = target.windowID,
+                      let bounds = frame(of: windowID, in: stack) {
+                rect = CGRect(x: bounds.minX + offset.x, y: bounds.maxY - offset.y - target.size.height,
+                              width: target.size.width, height: target.size.height).intersection(bounds)
             }
             var hidden = rect.isNull || rect.width < 2 || rect.height < 2
             if !hidden, let windowID = target.windowID { hidden = !isShowing(windowID, rect, in: stack) }
+            if !hidden, target.webArea == nil, target.areaTries > 0, followTicks % 6 == 0 {
+                target.areaTries -= 1
+                target.webArea = AX.webArea(at: NSPoint(x: rect.midX, y: rect.midY), pid: target.pid)
+            }
             // Asking the app what is at the spot costs more, so it runs less often,
             // except while hidden so the blur is back the moment its tab is.
             if !hidden, let area = target.webArea, followTicks % 6 == 0 || offscreen.contains(region.id) {
