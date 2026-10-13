@@ -68,6 +68,47 @@ enum HotKeys {
     }
 }
 
+// MARK: - Overlay space (private SkyLight API)
+
+/// Windows on a normal Space drop out for a moment while macOS animates a swipe
+/// between Spaces or full-screen apps, which exposes what the blur was hiding.
+/// Putting them in our own always-visible space keeps them fixed on the display
+/// through the whole transition. Falls back to ordinary windows if the API is gone.
+enum OverlaySpace {
+    private typealias MainConnection = @convention(c) () -> Int32
+    private typealias SpaceCreate = @convention(c) (Int32, Int32, Int32) -> UInt64
+    private typealias SpaceSetLevel = @convention(c) (Int32, UInt64, Int32) -> Int32
+    private typealias ShowSpaces = @convention(c) (Int32, CFArray) -> Int32
+    private typealias AddWindows = @convention(c) (Int32, UInt64, CFArray, Int32) -> Int32
+
+    private static let skyLight = dlopen("/System/Library/PrivateFrameworks/SkyLight.framework/SkyLight", RTLD_NOW)
+
+    private static func symbol<T>(_ name: String) -> T? {
+        guard let skyLight, let pointer = dlsym(skyLight, name) else { return nil }
+        return unsafeBitCast(pointer, to: T.self)
+    }
+
+    private static let space: (connection: Int32, id: UInt64)? = {
+        guard let main: MainConnection = symbol("SLSMainConnectionID"),
+              let create: SpaceCreate = symbol("SLSSpaceCreate"),
+              let setLevel: SpaceSetLevel = symbol("SLSSpaceSetAbsoluteLevel"),
+              let show: ShowSpaces = symbol("SLSShowSpaces") else { return nil }
+        let connection = main()
+        let id = create(connection, 1, 0)
+        guard id != 0 else { return nil }
+        _ = setLevel(connection, id, 400)
+        _ = show(connection, [id] as CFArray)
+        return (connection, id)
+    }()
+
+    static var isAvailable: Bool { space != nil }
+
+    static func pin(_ window: NSWindow) {
+        guard let space, let add: AddWindows = symbol("SLSSpaceAddWindowsAndRemoveFromSpaces") else { return }
+        _ = add(space.connection, space.id, [window.windowNumber] as CFArray, 7)
+    }
+}
+
 // MARK: - Blur windows
 
 final class BlurView: NSView {
@@ -179,6 +220,7 @@ final class BlurWindow: NSPanel {
         hidesOnDeactivate = false
         isReleasedWhenClosed = false
         contentView = blur
+        OverlaySpace.pin(self)
     }
 
     override var canBecomeKey: Bool { false }
